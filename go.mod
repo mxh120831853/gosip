@@ -6,7 +6,7 @@ require (
 	github.com/discoviking/fsm v0.0.0-20150126104936-f4a273feecca
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
-	github.com/gobwas/ws v1.0.4 // indirect
+	github.com/gobwas/ws v1.0.4
 	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
 	github.com/mattn/go-colorable v0.1.4 // indirect
 	github.com/mattn/go-isatty v0.0.11 // indirect

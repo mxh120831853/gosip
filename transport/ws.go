@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -131,14 +130,13 @@ func (wsp *wsProtocol) Done() <-chan struct{} {
 
 func (wsp *wsProtocol) Listen(target *Target) error {
 	target = FillTargetHostAndPort(wsp.Network(), target)
-	network := strings.ToLower(wsp.Network())
 	// resolve local TCP endpoint
 	laddr, err := wsp.resolveTarget(target)
 	if err != nil {
 		return err
 	}
 	// create listener
-	listener, err := net.ListenTCP(network, laddr)
+	listener, err := net.ListenTCP("tcp", laddr)
 	if err != nil {
 		return &ProtocolError{
 			err,
@@ -192,9 +190,8 @@ func (wsp *wsProtocol) Send(target *Target, msg sip.Message) error {
 
 func (wsp *wsProtocol) resolveTarget(target *Target) (*net.TCPAddr, error) {
 	addr := target.Addr()
-	network := strings.ToLower(wsp.Network())
 	// resolve remote address
-	raddr, err := net.ResolveTCPAddr(network, addr)
+	raddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
 		return nil, &ProtocolError{
 			err,
@@ -212,7 +209,7 @@ func (wsp *wsProtocol) getOrCreateConnection(raddr *net.TCPAddr) (Connection, er
 	if err != nil {
 		wsp.Log().Debugf("connection for remote address %s %s not found, create a new one", wsp.Network(), raddr)
 
-		tcpConn, err := net.DialTCP(wsp.network, nil, raddr)
+		tcpConn, err := net.DialTCP("tcp", nil, raddr)
 		if err != nil {
 			return nil, &ProtocolError{
 				err,
@@ -222,6 +219,8 @@ func (wsp *wsProtocol) getOrCreateConnection(raddr *net.TCPAddr) (Connection, er
 		}
 
 		conn = NewConnection(tcpConn, key, wsp.Log())
+
+		// todo upgrade to websockets
 
 		if err := wsp.connections.Put(conn, sockTTL); err != nil {
 			return conn, err
