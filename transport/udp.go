@@ -92,7 +92,7 @@ func (udp *udpProtocol) Send(target *Target, msg sip.Message) error {
 	// send through already opened by connection
 	// to always use same local port
 	_, port, err := net.SplitHostPort(msg.Source())
-	conn, err := udp.connections.Get(ConnectionKey("udp:0.0.0.0:" + port))
+	conn, err := udp.connections.Get(ConnectionKey(udp.network + ":0.0.0.0:" + port))
 	if err != nil {
 		// todo change this bloody patch
 		if len(udp.connections.All()) == 0 {

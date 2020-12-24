@@ -65,6 +65,8 @@ func (tcp *tcpProtocol) pipePools() {
 				// TODO should it be passed up to UA?
 				logger.Errorf("put new TCP connection failed: %s", err)
 
+				conn.Close()
+
 				continue
 			}
 		}
@@ -93,7 +95,7 @@ func (tcp *tcpProtocol) Listen(target *Target) error {
 
 	// index listeners by local address
 	// should live infinitely
-	key := ListenerKey(fmt.Sprintf("tcp:0.0.0.0:%d", laddr.Port))
+	key := ListenerKey(fmt.Sprintf("%s:0.0.0.0:%d", tcp.network, laddr.Port))
 	err = tcp.listeners.Put(key, listener)
 
 	return err // should be nil here
@@ -149,14 +151,12 @@ func (tcp *tcpProtocol) resolveTarget(target *Target) (*net.TCPAddr, error) {
 }
 
 func (tcp *tcpProtocol) getOrCreateConnection(raddr *net.TCPAddr) (Connection, error) {
-	network := strings.ToLower(tcp.Network())
-
-	key := ConnectionKey("tcp:" + raddr.String())
+	key := ConnectionKey(tcp.network + ":" + raddr.String())
 	conn, err := tcp.connections.Get(key)
 	if err != nil {
 		tcp.Log().Debugf("connection for remote address %s %s not found, create a new one", tcp.Network(), raddr)
 
-		tcpConn, err := net.DialTCP(network, nil, raddr)
+		tcpConn, err := net.DialTCP(tcp.network, nil, raddr)
 		if err != nil {
 			return nil, &ProtocolError{
 				err,
