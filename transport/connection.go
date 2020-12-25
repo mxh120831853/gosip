@@ -19,6 +19,7 @@ type Connection interface {
 	net.Conn
 
 	Key() ConnectionKey
+	SetKey(key ConnectionKey)
 	Network() string
 	Streamed() bool
 	String() string
@@ -84,7 +85,15 @@ func (conn *connection) Log() log.Logger {
 }
 
 func (conn *connection) Key() ConnectionKey {
+	conn.mu.RLock()
+	defer conn.mu.RUnlock()
 	return conn.key
+}
+
+func (conn *connection) SetKey(key ConnectionKey) {
+	conn.mu.Lock()
+	conn.key = key
+	conn.mu.Unlock()
 }
 
 func (conn *connection) Streamed() bool {

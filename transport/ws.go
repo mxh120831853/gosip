@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -51,7 +52,7 @@ func (wsp *wsProtocol) pipePools() {
 	wsp.Log().Debug("start pipe pools")
 	defer wsp.Log().Debug("stop pipe pools")
 
-	up := ws.Upgrader{
+	wsUp := ws.Upgrader{
 		Protocol: func(val []byte) bool {
 			return string(val) == "sip"
 		},
@@ -62,9 +63,11 @@ func (wsp *wsProtocol) pipePools() {
 		case <-wsp.listeners.Done():
 			return
 		case conn := <-wsp.conns:
+			conn.SetKey(ConnectionKey(strings.Replace(string(conn.Key()), "tcp", "ws", 1)))
+
 			logger := log.AddFieldsFrom(wsp.Log(), conn)
 
-			if _, err := up.Upgrade(conn); err != nil {
+			if _, err := wsUp.Upgrade(conn); err != nil {
 				logger.Errorf("websocket connection upgrade failed: %s", err)
 
 				conn.Close()
@@ -86,41 +89,61 @@ func (wsp *wsProtocol) pipePools() {
 
 type wsConn struct {
 	Connection
-	r *wsutil.Reader
-	w *wsutil.Writer
+	r    *wsutil.Reader
+	w    *wsutil.Writer
+	ctrl wsutil.FrameHandlerFunc
 }
 
 func wrapWsConn(conn Connection) *wsConn {
-	return &wsConn{
+	wsc := &wsConn{
 		Connection: conn,
-		r:          wsutil.NewReader(conn, ws.StateServerSide),
+		ctrl:       wsutil.ControlFrameHandler(conn, ws.StateServerSide),
+		r:          wsutil.NewServerSideReader(conn),
 		w:          wsutil.NewWriter(conn, ws.StateServerSide, ws.OpText),
 	}
+	controlHandler := wsc.ctrl
+	wsc.r.CheckUTF8 = true
+	wsc.r.OnIntermediate = controlHandler
+	return wsc
 }
 
 func (conn *wsConn) Read(buf []byte) (int, error) {
-	hdr, err := conn.r.NextFrame()
-	if err != nil {
-		return 0, fmt.Errorf("read next WS frame: %w", err)
-	}
-	if hdr.OpCode == ws.OpClose {
-		return 0, io.EOF
-	}
-	if n, err := conn.r.Read(buf); err == nil {
-		return n, nil
-	} else {
-		return n, fmt.Errorf("read from WS connection: %w", err)
+	for {
+		hdr, err := conn.r.NextFrame()
+		if err != nil {
+			return 0, fmt.Errorf("read ws next frame: %w", err)
+		}
+		if hdr.OpCode == ws.OpClose {
+			return 0, io.EOF
+		}
+		if hdr.OpCode.IsControl() {
+			if err := conn.ctrl(hdr, conn.r); err != nil {
+				return 0, fmt.Errorf("handle ws control message: %w", err)
+			}
+			continue
+		}
+		if hdr.OpCode&ws.OpText == 0 {
+			if err := conn.r.Discard(); err != nil {
+				return 0, fmt.Errorf("discard ws non-text message: %w", err)
+			}
+			continue
+		}
+		if n, err := io.ReadFull(conn.r, buf[:hdr.Length]); err == nil {
+			return n, nil
+		} else {
+			return n, fmt.Errorf("read ws message payload: %w", err)
+		}
 	}
 }
 
 func (conn *wsConn) Write(buf []byte) (int, error) {
 	if n, err := conn.w.Write(buf); err == nil {
 		if err = conn.w.Flush(); err != nil {
-			err = fmt.Errorf("flush WS writer: %w", err)
+			err = fmt.Errorf("flush ws writer: %w", err)
 		}
 		return n, err
 	} else {
-		return n, fmt.Errorf("write to WS connection: %w", err)
+		return n, fmt.Errorf("write to ws connection: %w", err)
 	}
 }
 
@@ -220,7 +243,7 @@ func (wsp *wsProtocol) getOrCreateConnection(raddr *net.TCPAddr) (Connection, er
 
 		conn = NewConnection(tcpConn, key, wsp.Log())
 
-		// todo upgrade to websockets
+		// todo upgrade to websockets?
 
 		if err := wsp.connections.Put(conn, sockTTL); err != nil {
 			return conn, err
