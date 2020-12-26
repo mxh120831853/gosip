@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"strings"
 
 	"github.com/gobwas/ws"
@@ -18,6 +19,8 @@ type wsProtocol struct {
 	listeners   ListenerPool
 	connections ConnectionPool
 	conns       chan Connection
+	upg         *wsUpgrader
+	dial        *wsDialer
 }
 
 func NewWsProtocol(
@@ -40,6 +43,12 @@ func NewWsProtocol(
 	// TODO: add separate errs chan to listen errors from pool for reconnection?
 	wsp.listeners = NewListenerPool(wsp.conns, errs, cancel, wsp.Log())
 	wsp.connections = NewConnectionPool(output, errs, cancel, msgMapper, wsp.Log())
+	wsp.upg = &wsUpgrader{}
+	wsp.upg.Protocol = func(val []byte) bool {
+		return string(val) == "sip"
+	}
+	wsp.dial = &wsDialer{}
+	wsp.dial.Protocols = []string{"sip"}
 	// pipe listener and connection pools
 	go wsp.pipePools()
 
@@ -52,12 +61,6 @@ func (wsp *wsProtocol) pipePools() {
 	wsp.Log().Debug("start pipe pools")
 	defer wsp.Log().Debug("stop pipe pools")
 
-	wsUp := ws.Upgrader{
-		Protocol: func(val []byte) bool {
-			return string(val) == "sip"
-		},
-	}
-
 	for {
 		select {
 		case <-wsp.listeners.Done():
@@ -67,15 +70,7 @@ func (wsp *wsProtocol) pipePools() {
 
 			logger := log.AddFieldsFrom(wsp.Log(), conn)
 
-			if _, err := wsUp.Upgrade(conn); err != nil {
-				logger.Errorf("websocket connection upgrade failed: %s", err)
-
-				conn.Close()
-
-				continue
-			}
-
-			if err := wsp.connections.Put(wrapWsConn(conn), sockTTL); err != nil {
+			if err := wsp.connections.Put(wrapWsConn(conn, wsp.upg, logger), sockTTL); err != nil {
 				// TODO should it be passed up to UA?
 				logger.Errorf("put new TCP connection failed: %s", err)
 
@@ -94,16 +89,70 @@ type wsConn struct {
 	ctrl wsutil.FrameHandlerFunc
 }
 
-func wrapWsConn(conn Connection) *wsConn {
-	wsc := &wsConn{
-		Connection: conn,
-		ctrl:       wsutil.ControlFrameHandler(conn, ws.StateServerSide),
-		r:          wsutil.NewServerSideReader(conn),
-		w:          wsutil.NewWriter(conn, ws.StateServerSide, ws.OpText),
+type wsUpgrader struct {
+	ws.Upgrader
+}
+
+func (u *wsUpgrader) Upgrade(rw io.ReadWriter) error {
+	if _, err := u.Upgrader.Upgrade(rw); err != nil {
+		return fmt.Errorf("upgrade inbound WS connection: %w", err)
 	}
-	controlHandler := wsc.ctrl
-	wsc.r.CheckUTF8 = true
-	wsc.r.OnIntermediate = controlHandler
+
+	return nil
+}
+
+type wsDialer struct {
+	ws.Dialer
+}
+
+func (d *wsDialer) Upgrade(rw io.ReadWriter) error {
+	conn, ok := rw.(net.Conn)
+	if !ok {
+		return fmt.Errorf("only net.Conn is supported")
+	}
+
+	u, err := url.Parse(fmt.Sprintf("ws://%s", conn.RemoteAddr()))
+	if err != nil {
+		return fmt.Errorf("parse remote WS url: %w", err)
+	}
+
+	if _, _, err = d.Dialer.Upgrade(conn, u); err != nil {
+		return fmt.Errorf("upgrade outbound WS connection: %w", err)
+	}
+
+	return nil
+}
+
+func wrapWsConn(conn Connection, upgrader interface{ Upgrade(rw io.ReadWriter) error }, logger log.Logger) Connection {
+	if err := upgrader.Upgrade(conn); err != nil {
+		logger.Warnf("fallback to TCP connection due to WS upgrade error: %s", err)
+
+		return conn
+	}
+
+	var wsc *wsConn
+	switch upgrader.(type) {
+	case *wsUpgrader:
+		// inbound setup
+		wsc = &wsConn{
+			Connection: conn,
+			ctrl:       wsutil.ControlFrameHandler(conn, ws.StateServerSide),
+			r:          wsutil.NewServerSideReader(conn),
+			w:          wsutil.NewWriter(conn, ws.StateServerSide, ws.OpText),
+		}
+		controlHandler := wsc.ctrl
+		wsc.r.CheckUTF8 = true
+		wsc.r.OnIntermediate = controlHandler
+	case *wsDialer:
+		// outbound setup
+		wsc = &wsConn{
+			Connection: conn,
+			ctrl:       nil, // todo ???
+			r:          wsutil.NewClientSideReader(conn),
+			w:          wsutil.NewWriter(conn, ws.StateClientSide, ws.OpText),
+		}
+	}
+
 	return wsc
 }
 
@@ -243,9 +292,7 @@ func (wsp *wsProtocol) getOrCreateConnection(raddr *net.TCPAddr) (Connection, er
 
 		conn = NewConnection(tcpConn, key, wsp.Log())
 
-		// todo upgrade to websockets?
-
-		if err := wsp.connections.Put(conn, sockTTL); err != nil {
+		if err := wsp.connections.Put(wrapWsConn(conn, wsp.dial, log.AddFieldsFrom(wsp.Log(), conn)), sockTTL); err != nil {
 			return conn, err
 		}
 	}
